@@ -1,0 +1,92 @@
+#!/usr/bin/env bash
+
+################################################################################
+# Script: informe_home.sh
+# Plataforma: AlmaLinux/RHEL
+# Versión: 2.0
+# Descripción:
+#   Audita directorios de usuario en /home y genera informe detallado.
+#   Registro de actividad con manejo de errores robusto.
+#   Compatibilidad total con SELinux.
+################################################################################
+
+# Configuración
+LOGFILE="/var/log/auditoria_home.log"      # Ruta del archivo de log
+REPORT_DIR="/tmp"                          # Directorio para informes
+REPORT_FILE="${REPORT_DIR}/informe_home_$(date +%Y-%m-%d).txt"  # Nombre del informe
+ADMIN_EMAIL="admin@example.com"            # Email del administrador
+
+# Función: Registrar eventos
+log_msg() {
+    local timestamp=$(date +"%Y-%m-%d %T")
+    echo "[${timestamp}] [PID $$] $1" | sudo tee -a "$LOGFILE" >/dev/null
+}
+
+# 1. Verificar privilegios de root
+if [[ $EUID -ne 0 ]]; then
+    echo "Error: Este script requiere privilegios de root." >&2
+    exit 1
+fi
+
+# 2. Inicializar sistema de logs
+sudo touch "$LOGFILE" || { echo "Error: No se pudo crear ${LOGFILE}"; exit 1; }
+sudo chmod 600 "$LOGFILE"
+log_msg "=== INICIO DE AUDITORÍA ==="
+
+# 3. Verificar existencia de /home
+if [[ ! -d "/home" ]]; then
+    log_msg "Error crítico: El directorio /home no existe"
+    exit 1
+fi
+
+# 4. Preparar informe
+{
+    printf "%-15s | %-10s | %-12s | %-12s | %s\n" \
+        "USUARIO" "PERMISOS" "PROPIETARIO" "GRUPO" "TAMAÑO"
+    printf "%s\n" "---------------------------------------------------------------"
+} > "$REPORT_FILE"
+
+# 5. Procesar directorios
+while IFS= read -r -d '' dir; do
+    usuario=$(basename "$dir")
+    
+    # Obtener metadata
+    permisos=$(stat -c "%A" "$dir" 2>/dev/null) || {
+        log_msg "Error: No se pueden leer permisos de ${dir}"
+        continue
+    }
+    
+    propietario=$(stat -c "%U" "$dir")
+    grupo=$(stat -c "%G" "$dir")
+    tamaño=$(du -sh "$dir" 2>/dev/null | cut -f1) || {
+        log_msg "Error: No se puede medir tamaño de ${dir}"
+        tamaño="N/A"
+    }
+
+    # Escribir en informe
+    printf "%-15s | %-10s | %-12s | %-12s | %s\n" \
+        "$usuario" "$permisos" "$propietario" "$grupo" "$tamaño" >> "$REPORT_FILE"
+
+done < <(find /home -maxdepth 1 -type d -not -name "lost+found" -print0)
+
+# 6. Finalización
+log_msg "Auditoría completada. Informe generado: ${REPORT_FILE}"
+
+# 7. Enviar por correo (solo si está configurado)
+if command -v mailx &>/dev/null; then
+    echo "Adjunto informe de auditoría del $(date +"%d/%m/%Y")" | \
+        mailx -s "[AlmaLinux] Auditoría /home" \
+        -a "$REPORT_FILE" \
+        "$ADMIN_EMAIL"
+    log_msg "Informe enviado a ${ADMIN_EMAIL}"
+else
+    log_msg "Advertencia: mailx no instalado. Informe no enviado por correo."
+fi
+
+# 8. Ajustes SELinux (automático)
+if selinuxenabled; then
+    log_msg "Aplicando contexto SELinux..."
+    sudo restorecon -v "$LOGFILE" "$REPORT_FILE" &>/dev/null
+fi
+
+exit 0
