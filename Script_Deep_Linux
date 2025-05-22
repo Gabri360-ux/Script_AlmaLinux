@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+
+################################################################################
+# Script: informe_home.sh
+# Plataforma: AlmaLinux/RHEL 8+
+# Versión: 3.1
+# Descripción:
+#   Audita directorios de usuario en /home y genera informe detallado en UTF-8
+#   Soporte completo para caracteres especiales (ñ, acentos, etc.)
+#   Registro de actividad profesional con formato
+################################################################################
+
+# Configuración regional explícita para español
+export LC_ALL="es_ES.UTF-8"
+export LANG="es_ES.UTF-8"
+export LANGUAGE="es_ES.UTF-8"
+
+# Configuración de rutas
+LOGFILE="/var/log/auditoria_home.log"      # Ruta del archivo de log
+REPORT_DIR="/tmp/auditorias_home"          # Directorio para informes
+REPORT_FILE="${REPORT_DIR}/informe_home_$(date +%Y-%m-%d_%H%M).txt"  # Nombre del informe
+ADMIN_EMAIL="admin@example.com"            # Email del administrador
+
+# Función de logging profesional
+log_msg() {
+    local timestamp=$(date +"%Y-%m-%d %T")
+    local log_entry="[${timestamp}] [PID $$] [${1^^}] $2"
+    echo "$log_entry" | tee -a "$LOGFILE" >/dev/null
+}
+
+# 1. Verificar privilegios de root
+if [[ $EUID -ne 0 ]]; then
+    log_msg "error" "Este script requiere privilegios de root."
+    exit 1
+fi
+
+# 2. Verificar soporte para UTF-8
+if ! locale -a | grep -qi "es_ES.utf8"; then
+    log_msg "error" "Locale es_ES.UTF-8 no está instalado."
+    echo "Ejecute para corregir:"
+    echo "  sudo dnf install glibc-langpack-es -y"
+    echo "  sudo localectl set-locale LANG=es_ES.UTF-8"
+    exit 1
+fi
+
+# 3. Inicializar sistema de logs
+touch "$LOGFILE" || { log_msg "error" "No se pudo crear ${LOGFILE}"; exit 1; }
+chmod 600 "$LOGFILE"
+log_msg "inicio" "=== INICIO DE AUDITORÍA ==="
+
+# 4. Verificar existencia de /home
+if [[ ! -d "/home" ]]; then
+    log_msg "error" "El directorio /home no existe"
+    exit 1
+fi
+
+# 5. Preparar directorio de informes
+mkdir -p "$REPORT_DIR" || { log_msg "error" "No se pudo crear ${REPORT_DIR}"; exit 1; }
+chmod 700 "$REPORT_DIR"
+
+# 6. Generar encabezado del informe
+{
+    echo "# Auditoría de Directorios /home - $(date +"%d/%m/%Y %H:%M")"
+    echo "# Sistema: $(hostname)"
+    echo "# UUID: $(uuidgen)"
+    echo "================================================================"
+    printf "%-25s | %-12s | %-15s | %-15s | %s\n" \
+        "USUARIO" "PERMISOS" "PROPIETARIO" "GRUPO" "TAMAÑO"
+    echo "---------------------------------------------------------------"
+} > "$REPORT_FILE"
+
+# 7. Procesar directorios con soporte UTF-8
+total_dirs=0
+errors=0
+
+while IFS= read -r -d '' dir; do
+    ((total_dirs++))
+    
+    # Omitir directorios especiales
+    if [[ "$dir" == "/home/lost+found" ]]; then
+        continue
+    fi
+
+    usuario=$(basename "$dir")
+    
+    # Obtener metadata con manejo de errores
+    permisos=$(stat -c "%A" "$dir" 2>&1) || {
+        log_msg "warning" "Permisos no accesibles: ${dir}"
+        ((errors++))
+        permisos="ERROR"
+    }
+    
+    propietario=$(stat -c "%U" "$dir" 2>/dev/null || echo "Desconocido")
+    grupo=$(stat -c "%G" "$dir" 2>/dev/null || echo "Desconocido")
+    tamaño=$(du -sh "$dir" 2>/dev/null | cut -f1) || {
+        log_msg "warning" "No se pudo medir tamaño: ${dir}"
+        tamaño="N/A"
+    }
+
+    # Escribir en informe
+    printf "%-25s | %-12s | %-15s | %-15s | %s\n" \
+        "$usuario" "$permisos" "$propietario" "$grupo" "$tamaño" >> "$REPORT_FILE"
+
+done < <(find /home -maxdepth 1 -type d -print0 2>/dev/null)
+
+# 8. Finalizar informe
+{
+    echo "================================================================"
+    echo "# Directorios procesados: ${total_dirs}"
+    echo "# Errores detectados: ${errors}"
+    echo "# Tamaño total: $(du -sh /home | cut -f1)"
+} >> "$REPORT_FILE"
+
+chmod 600 "$REPORT_FILE"
+log_msg "exito" "Informe generado: ${REPORT_FILE}"
+
+# 9. Envío por correo electrónico
+if command -v mailx &>/dev/null; then
+    {
+        echo "Adjunto informe de auditoría"
+        echo "Fecha: $(date +"%d/%m/%Y %H:%M")"
+        echo "Host: $(hostname)"
+        echo "Errores: ${errors}"
+    } | mailx -s "[Auditoría] Resultados /home" \
+              -a "Content-Type: text/plain; charset=UTF-8" \
+              -a "$REPORT_FILE" \
+              "$ADMIN_EMAIL"
+    
+    if [ $? -eq 0 ]; then
+        log_msg "exito" "Informe enviado a ${ADMIN_EMAIL}"
+    else
+        log_msg "error" "Fallo al enviar el correo"
+    fi
+else
+    log_msg "warning" "mailx no instalado. Informe no enviado."
+fi
+
+# 10. Aplicar contexto SELinux
+if selinuxenabled; then
+    log_msg "info" "Aplicando contexto SELinux..."
+    restorecon -v "$LOGFILE" "$REPORT_FILE" &>/dev/null
+fi
+
+# 11. Limpieza de informes antiguos (más de 7 días)
+find "$REPORT_DIR" -name "informe_home_*" -mtime +7 -delete
+
+log_msg "fin" "=== AUDITORÍA FINALIZADA ==="
+exit 0
